@@ -1,75 +1,125 @@
-import { NextResponse } from "next/server";
-import { Buffer } from "buffer";
+// app/api/auth/callback/route.js
+import { getSession } from "@/lib/session";
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const code  = searchParams.get("code");
-  const state = searchParams.get("state");
-  const stateCookie = request.cookies.get("oauth_state")?.value;
-  const codeVerifier = request.cookies.get("pkce_verifier")?.value;
+function redirectWithError(req, code, message) {
+  const u = new URL("/", req.url);
+  if (code) u.searchParams.set("error", code);
+  if (message) u.searchParams.set("message", message);
+  return Response.redirect(u); // 302
+}
 
-  // パラメータと state 検証
-  if (!code || !state || !stateCookie || state !== stateCookie) {
-    return NextResponse.json({ ok: false, step: "state", error: "invalid_state_or_code" }, { status: 400 });
-  }
-  if (!codeVerifier) {
-    return NextResponse.json({ ok: false, step: "pkce", error: "missing_code_verifier" }, { status: 400 });
-  }
+export async function GET(req) {
+  const url = new URL(req.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const err = url.searchParams.get("error");
+  const errDesc = url.searchParams.get("error_description");
 
-  const clientId = process.env.TW_CLIENT_ID;
-  const clientSecret = process.env.TW_CLIENT_SECRET;
-  const redirectUri = process.env.TW_CALLBACK_URL;
-  if (!clientId || !clientSecret || !redirectUri) {
-    return NextResponse.json({ ok: false, step: "env", error: "missing_env" }, { status: 500 });
+  // 1) ユーザーが拒否した / エラー戻り
+  if (err) {
+    return redirectWithError(req, err, errDesc ?? "authorization failed");
   }
 
-  // --- 認可コード → アクセストークン（PKCE: code_verifier を送る）---
-  const tokenRes = await fetch("https://api.twitter.com/2/oauth2/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      // 機密クライアントなので Basic 認証でOK（付けない場合は client_id を body に含める）
-      Authorization: "Basic " + Buffer.from(`${clientId}:${clientSecret}`).toString("base64"),
-    },
-    body: new URLSearchParams({
+  // 2) 必須 ENV
+  if (
+    !process.env.TW_CLIENT_ID ||
+    !process.env.TW_CLIENT_SECRET ||
+    !process.env.TW_CALLBACK_URL
+  ) {
+    return redirectWithError(req, "missing_env", "Required env vars are not set");
+  }
+
+  // 3) セッションから PKCE と state を取り出す
+  const session = await getSession(req);
+  const expectedState = session.get("oauth_state");
+  const codeVerifier = session.get("pkce_verifier");
+
+  if (!expectedState || state !== expectedState) {
+    return redirectWithError(req, "bad_state", "Invalid OAuth state");
+  }
+  if (!code || !codeVerifier) {
+    return redirectWithError(req, "missing_code", "Missing code or verifier");
+  }
+
+  try {
+    // 4) 認可コードをアクセストークンに交換
+    const tokenParams = new URLSearchParams({
       grant_type: "authorization_code",
+      client_id: process.env.TW_CLIENT_ID,
+      redirect_uri: process.env.TW_CALLBACK_URL,
       code,
-      redirect_uri: redirectUri,
       code_verifier: codeVerifier,
-    }),
-    cache: "no-store",
-  });
+    });
 
-  if (!tokenRes.ok) {
-    const text = await tokenRes.text();
-    console.error("token error:", tokenRes.status, text);
-    return NextResponse.json({ ok: false, step: "token", status: tokenRes.status, error: text }, { status: 400 });
+    const tokenRes = await fetch("https://api.twitter.com/2/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: tokenParams,
+    });
+
+    const tokenJson = await tokenRes.json();
+
+    if (!tokenRes.ok) {
+      // Twitter 側のエラーレスポンスをメッセージに入れる
+      return redirectWithError(
+        req,
+        "token_exchange_failed",
+        tokenJson?.error_description || tokenJson?.error || "token error"
+      );
+    }
+
+    const {
+      access_token,
+      refresh_token,
+      expires_in, // 秒
+      token_type,
+      scope,
+    } = tokenJson;
+
+    // 5) アカウント情報を取得
+    const meRes = await fetch(
+      "https://api.twitter.com/2/users/me?user.fields=protected,name,username",
+      {
+        headers: { Authorization: `Bearer ${access_token}` },
+        cache: "no-store",
+      }
+    );
+    const meJson = await meRes.json();
+
+    if (!meRes.ok || !meJson?.data) {
+      return redirectWithError(req, "me_failed", "Failed to fetch user");
+    }
+
+    const user = meJson.data; // { id, username, name, protected }
+
+    // 6) セッション保存
+    session.set("user", {
+      id: user.id,
+      username: user.username,
+      name: user.name,
+      protected: Boolean(user.protected),
+    });
+
+    // トークンも必要に応じて保存（本番は暗号化ストア推奨）
+    session.set("token", {
+      access_token,
+      refresh_token,
+      token_type,
+      scope,
+      // 失効時刻をミリ秒で保存
+      expires_at: Date.now() + (Number(expires_in) || 0) * 1000,
+    });
+
+    // 使い終わった PKCE / state は消す
+    session.set("pkce_verifier", undefined);
+    session.set("oauth_state", undefined);
+
+    await session.save();
+
+    // 7) ホームへリダイレクト
+    return Response.redirect(new URL("/", req.url));
+  } catch (e) {
+    console.error("[callback] unexpected error", e);
+    return redirectWithError(req, "callback_exception", "Unexpected error");
   }
-
-  const token = await tokenRes.json();
-  const accessToken = token.access_token;
-
-  // --- 動作確認: /2/users/me を呼ぶ（鍵アカ情報も一緒に） ---
-  const meRes = await fetch(
-    "https://api.twitter.com/2/users/me?user.fields=protected,username,name",
-    { headers: { Authorization: `Bearer ${accessToken}` }, cache: "no-store" }
-  );
-
-  if (!meRes.ok) {
-    const text = await meRes.text();
-    console.error("me error:", meRes.status, text);
-    return NextResponse.json({ ok: false, step: "me", status: meRes.status, error: text }, { status: 400 });
-  }
-
-  const me = await meRes.json();
-
-  // 後片付け（state / verifier を破棄）
-  const res = NextResponse.json({
-    ok: true,
-    user: me?.data ?? null,
-    hint: "本番では access_token を安全なストアに保存して使います",
-  });
-  res.cookies.set("oauth_state", "", { path: "/", maxAge: 0 });
-  res.cookies.set("pkce_verifier", "", { path: "/", maxAge: 0 });
-  return res;
 }

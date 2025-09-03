@@ -1,41 +1,74 @@
-import { NextResponse } from "next/server";
+// app/api/auth/start/route.js
 import crypto from "crypto";
+import { cookies } from "next/headers";
 
-// base64url 変換（PKCE用）
-const b64url = (buf) =>
-  buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+const AUTH_URL = "https://twitter.com/i/oauth2/authorize";
 
-export async function GET() {
-  const clientId = process.env.TW_CLIENT_ID;
-  const redirectUri = process.env.TW_CALLBACK_URL;
-  if (!clientId || !redirectUri) {
-    return NextResponse.json({ ok: false, error: "Missing env" }, { status: 500 });
+// Base64URL 変換
+function b64url(buf) {
+  return buf
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+// PKCE: code_verifier / code_challenge 生成
+function createPkce() {
+  const verifier = b64url(crypto.randomBytes(32)); // 43〜128 文字
+  const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
+  return { verifier, challenge };
+}
+
+// state 生成
+function createState() {
+  return b64url(crypto.randomBytes(24));
+}
+
+// Cookie 共通オプション
+const cookieOpts = {
+  httpOnly: true,
+  secure: true,
+  sameSite: "lax",
+  path: "/",
+  maxAge: 60 * 10, // 10分
+};
+
+export async function GET(request) {
+  const id = process.env.TW_CLIENT_ID;
+  const callback = process.env.TW_CALLBACK_URL;
+
+  // 必須環境変数チェック
+  if (!id || !callback) {
+    return new Response(JSON.stringify({ ok: false, error: "Missing env" }), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
   }
 
-  // PKCE: code_verifier と code_challenge(S256)
-  const codeVerifier = b64url(crypto.randomBytes(32));                       // 43〜128文字
-  const codeChallenge = b64url(crypto.createHash("sha256").update(codeVerifier).digest());
+  // PKCE & state を発行し Cookie に保存
+  const { verifier, challenge } = createPkce();
+  const state = createState();
+  const jar = cookies();
+  jar.set("pv_code_verifier", verifier, cookieOpts);
+  jar.set("pv_state", state, cookieOpts);
 
-  // CSRF対策
-  const state = b64url(crypto.randomBytes(16));
+  // 必要スコープ：最小限（必要に応じて追加）
+  const scope = [
+    "tweet.read",
+    "users.read",
+    // "offline.access", // リフレッシュトークンが欲しい場合は追加
+  ].join(" ");
 
-  // 認可URL（必要スコープだけ）
-  const scopes = "tweet.read users.read";
-  const url = new URL("https://twitter.com/i/oauth2/authorize");
+  // 認可エンドポイントへ
+  const url = new URL(AUTH_URL);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("scope", scopes);
+  url.searchParams.set("client_id", id);
+  url.searchParams.set("redirect_uri", callback);
+  url.searchParams.set("scope", scope);
   url.searchParams.set("state", state);
-  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
 
-  // 本番ドメインで有効な HttpOnly Cookie に保存（10分）
-  const res = NextResponse.redirect(url.toString());
-  res.cookies.set("oauth_state", state,        { httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 600 });
-  res.cookies.set("pkce_verifier", codeVerifier,{ httpOnly: true, secure: true, sameSite: "lax", path: "/", maxAge: 600 });
-
-  // （デバッグ用）発行したURLをログに出す → Vercel / Runtime Logs で見られる
-  console.log("[auth/start] authorize_url:", url.toString());
-  return res;
+  return Response.redirect(url.toString(), 302);
 }
