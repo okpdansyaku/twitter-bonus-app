@@ -1,55 +1,63 @@
+// /app/page.js
 "use client";
+
 import { useEffect, useState } from "react";
 
-export default function Home() {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+export default function Page() {
+  const [me, setMe] = useState({ loading: true, ok: false, user: null });
 
   useEffect(() => {
-    fetch("/api/auth/me").then(r => r.json()).then(d => {
-      if (d.ok) setUser(d.user);
-      setLoading(false);
-    });
+    (async () => {
+      try {
+        const r = await fetch("/api/auth/me", { cache: "no-store" });
+        const j = await r.json();
+        setMe({ loading: false, ...j });
+      } catch (e) {
+        setMe({ loading: false, ok: false, user: null });
+      }
+    })();
   }, []);
 
-  const onLogin = () => {
-    // そのまま start へ
-    window.location.href = "/api/auth/start";
-  };
-
-  const onLogout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
-    setUser(null);
-  };
-
-  if (loading) return null;
-
   return (
-    <main className="p-10 text-white">
-      <h1 className="text-4xl font-bold mb-6">リツイートボーナス</h1>
+    <main style={{ padding: 24 }}>
+      <h1>Twitter Bonus App</h1>
+      <p>ログインしてボーナス機能を試す</p>
 
-      {!user ? (
+      {me.loading ? (
+        <p>読み込み中...</p>
+      ) : me.ok ? (
         <>
-          <p className="mb-6">ログインしてボーナス機能を試す</p>
-          <button
-            onClick={onLogin}
-            className="bg-sky-600 hover:bg-sky-500 px-6 py-3 rounded-lg font-semibold"
-          >
-            Twitterでログイン
-          </button>
-        </>
-      ) : (
-        <>
-          <p className="mb-4">
-            ようこそ <b>{user.name}</b> (@{user.username})
+          <p>
+            ログイン中：<b>@{me.user.username}</b>（{me.user.name}）
           </p>
-          <button
-            onClick={onLogout}
-            className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded"
+          <a
+            href="/api/auth/logout"
+            style={{
+              display: "inline-block",
+              padding: "10px 16px",
+              background: "#444",
+              color: "#fff",
+              borderRadius: 6,
+              textDecoration: "none",
+            }}
           >
             ログアウト
-          </button>
+          </a>
         </>
+      ) : (
+        <a
+          href="/api/auth/start"
+          style={{
+            display: "inline-block",
+            padding: "10px 16px",
+            background: "#1d9bf0",
+            color: "#fff",
+            borderRadius: 6,
+            textDecoration: "none",
+          }}
+        >
+          Twitterでログイン
+        </a>
       )}
     </main>
   );

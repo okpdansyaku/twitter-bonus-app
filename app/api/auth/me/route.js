@@ -1,11 +1,11 @@
+// /app/api/auth/me/route.js
 import { getSession } from "@/lib/session";
 
-export async function GET(req) {
-  const session = await getSession(req);
-  const user = session.get("user"); // callbackで保存した { id, username, name, ... }
+export async function GET() {
+  const session = await getSession();
 
-  if (!user) {
-    return Response.json({ ok: false, user: null });
+  if (session.user) {
+    return Response.json({ ok: true, user: session.user });
   }
-  return Response.json({ ok: true, user });
+  return Response.json({ ok: false });
 }
