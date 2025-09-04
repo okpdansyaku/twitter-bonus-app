@@ -1,10 +1,11 @@
 // /app/api/auth/logout/route.js
-import { getSession } from "@/lib/session";
+export const runtime = "edge";
+
+import { deleteCookie } from "@/lib/session";
 
 export async function GET(request) {
-  const session = await getSession();
-  await session.destroy();
-
-  // 終了後はトップへリダイレクト
+  deleteCookie("sess");
+  deleteCookie("pkce_verifier");
+  deleteCookie("oauth_state");
   return Response.redirect(new URL("/", request.url));
 }
