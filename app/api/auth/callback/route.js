@@ -30,7 +30,14 @@ export async function GET(request) {
       });
     }
 
-    // PKCEトークン交換（Basic不要）
+    // 必須環境変数チェック
+    if (!process.env.TW_CLIENT_ID || !process.env.TW_CLIENT_SECRET || !process.env.TW_CALLBACK_URL) {
+      return new Response(JSON.stringify({ ok:false, error:"missing env (client_id/secret/callback)" }), {
+        status: 500, headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // PKCE + Basic 認証でトークン交換
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       client_id: process.env.TW_CLIENT_ID,
@@ -39,36 +46,51 @@ export async function GET(request) {
       code_verifier: verifier,
     });
 
+    // Basic 認証ヘッダー（client_id:client_secret を Base64）
+    const basic = typeof btoa === "function"
+      ? btoa(`${process.env.TW_CLIENT_ID}:${process.env.TW_CLIENT_SECRET}`)
+      : Buffer.from(`${process.env.TW_CLIENT_ID}:${process.env.TW_CLIENT_SECRET}`).toString("base64");
+
     const tokenRes = await fetch(TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${basic}`,
+      },
       body,
     });
+
     if (!tokenRes.ok) {
       const t = await tokenRes.text();
-      return new Response(JSON.stringify({ ok: false, error: "token exchange failed", detail: t }), {
+      return new Response(JSON.stringify({ ok:false, error:"token exchange failed", detail:t }), {
         status: 400, headers: { "Content-Type": "application/json" },
       });
     }
+
     const tokenJson = await tokenRes.json();
     const accessToken = tokenJson.access_token;
 
-    // 認証テスト: 自分のユーザー情報
+    // 自分のユーザー情報
     const userRes = await fetch(`${USER_URL}?user.fields=protected`, {
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",
     });
     if (!userRes.ok) {
       const t = await userRes.text();
-      return new Response(JSON.stringify({ ok: false, error: "fetch user failed", detail: t }), {
+      return new Response(JSON.stringify({ ok:false, error:"fetch user failed", detail:t }), {
         status: 400, headers: { "Content-Type": "application/json" },
       });
     }
     const { data: u } = await userRes.json();
 
     // セッション相当をCookieに保存（HttpOnly/7日）
-    const sess = { user: { id: u.id, username: u.username, name: u.name, protected: u.protected }, access_token: accessToken };
-    setCookie("sess", Buffer.from(JSON.stringify(sess), "utf8").toString("base64"), { maxAgeSec: 60 * 60 * 24 * 7 });
+    const sess = {
+      user: { id: u.id, username: u.username, name: u.name, protected: u.protected },
+      access_token: accessToken,
+    };
+    setCookie("sess", Buffer.from(JSON.stringify(sess), "utf8").toString("base64"), {
+      maxAgeSec: 60 * 60 * 24 * 7,
+    });
 
     // 一時Cookie掃除
     deleteCookie("pkce_verifier");
