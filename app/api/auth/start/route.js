@@ -1,74 +1,42 @@
-// app/api/auth/start/route.js
+// /app/api/auth/start/route.js
+import { getSession } from "@/lib/session";
 import crypto from "crypto";
-import { cookies } from "next/headers";
 
-const AUTH_URL = "https://twitter.com/i/oauth2/authorize";
+/**
+ * 必須:
+ * - TW_CLIENT_ID
+ * - TW_CALLBACK_URL 例: https://okp-d-rt-bonus.vercel.app/api/auth/callback
+ */
 
-// Base64URL 変換
-function b64url(buf) {
-  return buf
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+function base64url(buf) {
+  return buf.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
-
-// PKCE: code_verifier / code_challenge 生成
-function createPkce() {
-  const verifier = b64url(crypto.randomBytes(32)); // 43〜128 文字
-  const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
-  return { verifier, challenge };
-}
-
-// state 生成
-function createState() {
-  return b64url(crypto.randomBytes(24));
-}
-
-// Cookie 共通オプション
-const cookieOpts = {
-  httpOnly: true,
-  secure: true,
-  sameSite: "lax",
-  path: "/",
-  maxAge: 60 * 10, // 10分
-};
 
 export async function GET(request) {
-  const id = process.env.TW_CLIENT_ID;
-  const callback = process.env.TW_CALLBACK_URL;
+  // 1) ランダムな code_verifier を生成（43〜128文字推奨）
+  const verifier = base64url(crypto.randomBytes(64));
 
-  // 必須環境変数チェック
-  if (!id || !callback) {
-    return new Response(JSON.stringify({ ok: false, error: "Missing env" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
-  }
+  // 2) S256 で code_challenge を生成
+  const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
 
-  // PKCE & state を発行し Cookie に保存
-  const { verifier, challenge } = createPkce();
-  const state = createState();
-  const jar = cookies();
-  jar.set("pv_code_verifier", verifier, cookieOpts);
-  jar.set("pv_state", state, cookieOpts);
+  // 3) CSRF対策の state も生成
+  const state = base64url(crypto.randomBytes(24));
 
-  // 必要スコープ：最小限（必要に応じて追加）
-  const scope = [
-    "tweet.read",
-    "users.read",
-    // "offline.access", // リフレッシュトークンが欲しい場合は追加
-  ].join(" ");
+  // 4) セッションに保存
+  const session = await getSession();
+  session.pkce_verifier = verifier;
+  session.oauth_state = state;
+  await session.save();
 
-  // 認可エンドポイントへ
-  const url = new URL(AUTH_URL);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("client_id", id);
-  url.searchParams.set("redirect_uri", callback);
-  url.searchParams.set("scope", scope);
-  url.searchParams.set("state", state);
-  url.searchParams.set("code_challenge", challenge);
-  url.searchParams.set("code_challenge_method", "S256");
+  // 5) 認可エンドポイントへ
+  const authz = new URL("https://twitter.com/i/oauth2/authorize");
+  authz.searchParams.set("response_type", "code");
+  authz.searchParams.set("client_id", process.env.TW_CLIENT_ID);
+  authz.searchParams.set("redirect_uri", process.env.TW_CALLBACK_URL);
+  authz.searchParams.set("scope", ["tweet.read", "users.read", "offline.access"].join(" "));
+  authz.searchParams.set("state", state);
+  authz.searchParams.set("code_challenge", challenge);
+  authz.searchParams.set("code_challenge_method", "S256");
 
-  return Response.redirect(url.toString(), 302);
+  return Response.redirect(authz.toString());
 }
