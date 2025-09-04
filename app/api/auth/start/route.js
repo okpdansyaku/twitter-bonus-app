@@ -1,42 +1,52 @@
 // /app/api/auth/start/route.js
-import { getSession } from "@/lib/session";
-import crypto from "crypto";
+export const runtime = "nodejs";
 
-/**
- * 必須:
- * - TW_CLIENT_ID
- * - TW_CALLBACK_URL 例: https://okp-d-rt-bonus.vercel.app/api/auth/callback
- */
+import { getSession } from "@/lib/session";
+import { randomBytes, createHash } from "crypto";
 
 function base64url(buf) {
-  return buf.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return Buffer.from(buf)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 
-export async function GET(request) {
-  // 1) ランダムな code_verifier を生成（43〜128文字推奨）
-  const verifier = base64url(crypto.randomBytes(64));
+export async function GET() {
+  try {
+    if (!process.env.TW_CLIENT_ID || !process.env.TW_CALLBACK_URL) {
+      return Response.json(
+        { ok: false, error: "missing env TW_CLIENT_ID/TW_CALLBACK_URL" },
+        { status: 500 }
+      );
+    }
 
-  // 2) S256 で code_challenge を生成
-  const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
+    // 1) PKCE: verifier & challenge(S256)
+    const verifier = base64url(randomBytes(64)); // 86文字前後
+    const challenge = base64url(createHash("sha256").update(verifier).digest());
 
-  // 3) CSRF対策の state も生成
-  const state = base64url(crypto.randomBytes(24));
+    // 2) CSRF state
+    const state = base64url(randomBytes(24));
 
-  // 4) セッションに保存
-  const session = await getSession();
-  session.pkce_verifier = verifier;
-  session.oauth_state = state;
-  await session.save();
+    // 3) セッション保存
+    const session = await getSession();
+    session.pkce_verifier = verifier;
+    session.oauth_state = state;
+    await session.save();
 
-  // 5) 認可エンドポイントへ
-  const authz = new URL("https://twitter.com/i/oauth2/authorize");
-  authz.searchParams.set("response_type", "code");
-  authz.searchParams.set("client_id", process.env.TW_CLIENT_ID);
-  authz.searchParams.set("redirect_uri", process.env.TW_CALLBACK_URL);
-  authz.searchParams.set("scope", ["tweet.read", "users.read", "offline.access"].join(" "));
-  authz.searchParams.set("state", state);
-  authz.searchParams.set("code_challenge", challenge);
-  authz.searchParams.set("code_challenge_method", "S256");
+    // 4) 認可URL
+    const authz = new URL("https://twitter.com/i/oauth2/authorize");
+    authz.searchParams.set("response_type", "code");
+    authz.searchParams.set("client_id", process.env.TW_CLIENT_ID);
+    authz.searchParams.set("redirect_uri", process.env.TW_CALLBACK_URL);
+    authz.searchParams.set("scope", ["tweet.read", "users.read", "offline.access"].join(" "));
+    authz.searchParams.set("state", state);
+    authz.searchParams.set("code_challenge", challenge);
+    authz.searchParams.set("code_challenge_method", "S256");
 
-  return Response.redirect(authz.toString());
+    return Response.redirect(authz.toString());
+  } catch (e) {
+    console.error("[auth/start] error:", e);
+    return Response.json({ ok: false, error: "start_failed" }, { status: 500 });
+  }
 }
